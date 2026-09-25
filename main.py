@@ -26,8 +26,7 @@ logger = logging.getLogger(__name__)
 
 async def background_worker(bot):
     """
-    Multi-tenant worker loop: iterates through all authorized active users
-    and manages isolated scanning and publishing for each.
+    Multi-tenant worker loop: scans and publishes per-user with isolated state.
     """
     logger.info("Multi-tenant background worker loop started.")
     last_scan_times: Dict[int, float] = {}
@@ -51,13 +50,13 @@ async def background_worker(bot):
                         await engine.scan_user_sources(uid)
                         last_scan_times[uid] = time.time()
 
-                    # Process one pending item per user per tick
+                    # Process one pending item per user
                     published = await engine.publish_user_tick(uid, bot)
                     if published:
                         await asyncio.sleep(2)
 
                 except Exception as e:
-                    logger.error(f"Error processing worker for user {uid}: {e}")
+                    logger.error(f"Worker iteration error for user {uid}: {e}")
 
             await asyncio.sleep(10)
 
@@ -76,12 +75,12 @@ async def main():
 
     logger.info(f"Starting News Manager Bot (Owner: {config.owner_id})...")
 
-    # Pre-connect owner userbot if session string exists
+    # Pre-connect owner userbot if session exists
     try:
         user_client = await user_client_manager.get_or_create_client(config.owner_id)
         if await user_client.is_user_authorized():
             me = await user_client.get_me()
-            logger.info(f"Owner userbot pre-connected as: {getattr(me, 'first_name', 'User')}")
+            logger.info(f"Owner userbot connected as: {getattr(me, 'first_name', 'User')}")
     except Exception as e:
         logger.warning(f"Initial userbot connection attempt: {e}")
 
@@ -99,9 +98,17 @@ async def main():
     # Start Bot & Background Worker
     async with application:
         await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        logger.info("Telegram Bot polling started.")
+        try:
+            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        except Exception as e:
+            if "Conflict" in str(e):
+                logger.error(
+                    "⚠️ اخطار تداخل: نسخه دیگری از این ربات در حال اجرا است! "
+                    "لطفاً مطمئن شوید ربات روی کامپیوتر یا سرور دیگری باز نمانده باشد."
+                )
+            raise e
 
+        logger.info("Telegram Bot polling started successfully.")
         worker_task = asyncio.create_task(background_worker(application.bot))
 
         try:

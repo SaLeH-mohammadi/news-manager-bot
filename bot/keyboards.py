@@ -17,12 +17,12 @@ def get_main_menu_keyboard(
     keyboard = [
         # Toggle bot running
         [InlineKeyboardButton(status_btn, callback_data="toggle_running", style=status_style)],
-        # Manual actions
+        # Primary actions
         [
             InlineKeyboardButton("🔄 اسکن دستی", callback_data="scan_now", style="primary"),
             InlineKeyboardButton("🚀 انتشار فوری", callback_data="publish_now", style="success"),
         ],
-        # Userbot MTProto connection
+        # MTProto Userbot
         [InlineKeyboardButton("📱 ورود / اتصال اکانت (QR)", callback_data="qr_login", style="primary")],
         # Sources
         [InlineKeyboardButton("📋 مدیریت کانال‌های مبدا", callback_data="menu_sources", style="primary")],
@@ -52,6 +52,13 @@ def get_main_menu_keyboard(
         )
 
     return InlineKeyboardMarkup(keyboard)
+
+
+def get_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 پاک‌سازی تاریخچه خبرهای تکراری", callback_data="clear_hashes", style="danger")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu", style="danger")],
+    ])
 
 
 def get_users_management_keyboard(authorized_users: List[int], owner_id: int) -> InlineKeyboardMarkup:

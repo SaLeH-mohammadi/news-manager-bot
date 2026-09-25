@@ -1,14 +1,16 @@
 import asyncio
 import logging
+from typing import Optional
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
-from config import config
+from config import config, SettingsConfig
 from database import db
 from user_client import user_client_manager
 from engine import engine
 from bot.keyboards import (
     get_main_menu_keyboard,
+    get_stats_keyboard,
     get_sources_keyboard,
     get_back_keyboard,
     get_users_management_keyboard,
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 async def safe_edit_message(query, text: str, reply_markup=None, parse_mode: str = "Markdown"):
     """
-    ویرایش امن پیام برای جلوگیری از خطای Message is not modified تلگرام
+    Safely edits a message, ignoring 'Message is not modified' Telegram errors.
     """
     try:
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -28,13 +30,15 @@ async def safe_edit_message(query, text: str, reply_markup=None, parse_mode: str
         if "Message is not modified" in str(e):
             pass
         else:
-            logger.warning(f"Error editing message: {e}")
+            logger.warning(f"BadRequest editing message: {e}")
     except Exception as e:
         logger.error(f"Unexpected error editing message: {e}")
 
 
-async def render_dashboard_text(user_id: int) -> str:
-    settings = await db.get_user_settings(user_id)
+async def render_dashboard_text(user_id: int, settings: Optional[SettingsConfig] = None) -> str:
+    if settings is None:
+        settings = await db.get_user_settings(user_id)
+
     is_auth = await user_client_manager.is_authorized(user_id)
     user_info = await user_client_manager.get_me(user_id) if is_auth else None
 
@@ -79,7 +83,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["state"] = None
     settings = await db.get_user_settings(user_id)
-    text = await render_dashboard_text(user_id)
+    text = await render_dashboard_text(user_id, settings=settings)
     is_owner = (user_id == config.owner_id)
     keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
 
@@ -101,38 +105,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_owner = (user_id == config.owner_id)
     context.user_data["menu_msg_id"] = query.message.message_id
 
-    # بازگشت به منوی اصلی
+    # 1. Main Dashboard
     if data == "main_menu":
         context.user_data["state"] = None
-        text = await render_dashboard_text(user_id)
+        text = await render_dashboard_text(user_id, settings=settings)
         keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
         await safe_edit_message(query, text, reply_markup=keyboard)
 
-    # تغییر وضعیت روشن/خاموش
+    # 2. Toggle Running
     elif data == "toggle_running":
         settings.running = not settings.running
         await db.save_user_settings(user_id, settings)
-        text = await render_dashboard_text(user_id)
+        text = await render_dashboard_text(user_id, settings=settings)
         keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
         await safe_edit_message(query, text, reply_markup=keyboard)
 
-    # تغییر وضعیت ارسال عکس
+    # 3. Toggle Photo
     elif data == "toggle_photo":
         settings.send_photo = not settings.send_photo
         await db.save_user_settings(user_id, settings)
-        text = await render_dashboard_text(user_id)
+        text = await render_dashboard_text(user_id, settings=settings)
         keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
         await safe_edit_message(query, text, reply_markup=keyboard)
 
-    # تغییر وضعیت ارسال ویدیو
+    # 4. Toggle Video
     elif data == "toggle_video":
         settings.send_video = not settings.send_video
         await db.save_user_settings(user_id, settings)
-        text = await render_dashboard_text(user_id)
+        text = await render_dashboard_text(user_id, settings=settings)
         keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
         await safe_edit_message(query, text, reply_markup=keyboard)
 
-# 5. Scan Now (با گزارش دقیق)
+    # 5. Clear Hashes (Reset duplicate history)
+    elif data == "clear_hashes":
+        del_count = await db.clear_user_hashes(user_id)
+        msg = (
+            f"✅ **حافظه خبرهای تکراری شما بازنشانی شد.**\n\n"
+            f"تعداد `{del_count}` امضای تکراری از حافظه حذف گردید.\n"
+            "اکنون با زدن دکمه «اسکن دستی»، تمام پست‌های اخیر منابع شما مجدداً اسکن خواهند شد."
+        )
+        await safe_edit_message(query, msg, reply_markup=get_back_keyboard())
+
+    # 6. Scan Now
     elif data == "scan_now":
         if not settings.sources:
             await safe_edit_message(
@@ -163,7 +177,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📥 مجموع پست‌های جدید افزوده شده به صف: `{queued_count}`"
         )
         await safe_edit_message(query, msg, reply_markup=get_back_keyboard())
-    # انتشار فوری
+
+    # 7. Publish Now
     elif data == "publish_now":
         if not settings.dest_channel:
             await safe_edit_message(
@@ -184,11 +199,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await safe_edit_message(
                 query,
-                "ℹ️ صف اخبار شما خالی است یا تنظیمات کانال بررسی نشده است.",
+                "ℹ️ صف اخبار شما خالی است (یا ربات در کانال مقصد دسترسی ارسال پیام ندارد).",
                 reply_markup=get_back_keyboard(),
             )
 
-    # ورود با QR
+    # 8. QR Login
     elif data == "qr_login":
         await safe_edit_message(
             query,
@@ -237,7 +252,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         )
 
-    # منوی منابع
+    # 9. Sources Menu
     elif data == "menu_sources":
         if settings.sources:
             text = (
@@ -271,7 +286,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = get_sources_keyboard(settings.sources)
             await safe_edit_message(query, text, reply_markup=keyboard)
 
-    # کانال مقصد
+    # 10. Destination Menu
     elif data == "menu_dest":
         context.user_data["state"] = "WAITING_FOR_DEST"
         current_dest = settings.dest_channel if settings.dest_channel else "هنوز تنظیمی ثبت نشده"
@@ -283,7 +298,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_back_keyboard(),
         )
 
-    # امضای خبر
+    # 11. Signature Menu
     elif data == "menu_sig":
         context.user_data["state"] = "WAITING_FOR_SIG"
         current_sig = settings.signature if settings.signature else "بدون امضا"
@@ -295,7 +310,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_back_keyboard(),
         )
 
-    # فاصله اسکن
+    # 12. Interval Menu
     elif data == "menu_interval":
         context.user_data["state"] = "WAITING_FOR_INTERVAL"
         await safe_edit_message(
@@ -305,7 +320,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_back_keyboard(),
         )
 
-    # آمار
+    # 13. Stats Menu
     elif data == "menu_stats":
         stats = await db.get_queue_stats(user_id)
         text = (
@@ -317,9 +332,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ خطای ارسال (Failed): `{stats.get('failed', 0)}`\n"
             "━━━━━━━━━━━━━━━━━━━━"
         )
-        await safe_edit_message(query, text, reply_markup=get_back_keyboard())
+        await safe_edit_message(query, text, reply_markup=get_stats_keyboard())
 
-    # راهنما
+    # 14. Help Menu
     elif data == "menu_help":
         text = (
             "📖 **راهنمای استفاده از پنل اختصاصی**\n"
@@ -332,7 +347,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await safe_edit_message(query, text, reply_markup=get_back_keyboard())
 
-    # بخش مالک: مدیریت کاربران
+    # 15. Owner User Management
     elif data == "menu_users":
         if not is_owner:
             await query.answer("⛔ این بخش منحصراً برای مالک اصلی ربات است.", show_alert=True)
@@ -383,7 +398,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_owner = (user_id == config.owner_id)
     menu_msg_id = context.user_data.get("menu_msg_id")
 
-    # حذف پیام ارسالی کاربر برای تمیز ماندن محیط چت
+    # Clean up user's prompt text
     try:
         await update.effective_message.delete()
     except Exception:
@@ -410,13 +425,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data["menu_msg_id"] = msg.message_id
 
-    # 1. رمز دومرحله‌ای
+    # 1. 2FA Password
     if state == "WAITING_FOR_2FA":
         success, msg = await user_client_manager.submit_2fa_password(user_id, text)
         context.user_data["state"] = None
         await update_previous_or_send(msg, get_back_keyboard())
 
-    # 2. افزودن کانال مبدا
+    # 2. Add Source
     elif state == "WAITING_FOR_SOURCE":
         if text not in settings.sources:
             settings.sources.append(text)
@@ -432,7 +447,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 get_sources_keyboard(settings.sources),
             )
 
-    # 3. تنظیم کانال مقصد
+    # 3. Set Destination
     elif state == "WAITING_FOR_DEST":
         settings.dest_channel = text
         await db.save_user_settings(user_id, settings)
@@ -442,7 +457,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             get_back_keyboard(),
         )
 
-    # 4. تنظیم امضا
+    # 4. Set Signature
     elif state == "WAITING_FOR_SIG":
         settings.signature = "" if text.lower() == "none" else text
         await db.save_user_settings(user_id, settings)
@@ -453,7 +468,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             get_back_keyboard(),
         )
 
-    # 5. تنظیم فاصله زمانی اسکن
+    # 5. Set Interval
     elif state == "WAITING_FOR_INTERVAL":
         if text.isdigit() and int(text) >= 1:
             settings.interval_min = int(text)
@@ -469,7 +484,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 get_back_keyboard(),
             )
 
-    # 6. افزودن کاربر جدید توسط مالک
+    # 6. Add Authorized User
     elif state == "WAITING_FOR_USER_ID" and is_owner:
         if text.isdigit():
             new_uid = int(text)
@@ -486,8 +501,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 get_back_users_keyboard(),
             )
 
-    # حالت پیش‌فرض: بازگشت به داشبورد
+    # Fallback to dashboard
     else:
-        text_dash = await render_dashboard_text(user_id)
+        text_dash = await render_dashboard_text(user_id, settings=settings)
         keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
         await update_previous_or_send(text_dash, keyboard)

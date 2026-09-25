@@ -16,6 +16,24 @@ MEDIA_DIR = "/tmp/news_bot_media"
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 
+def normalize_channel_target(entity_str: str):
+    target = entity_str.strip()
+    for prefix in ["https://t.me/joinchat/", "https://t.me/+", "https://t.me/", "t.me/"]:
+        if target.startswith(prefix):
+            target = target.replace(prefix, "")
+            break
+
+    if target.startswith("-100") and target[4:].isdigit():
+        return int(target)
+    elif target.startswith("-") and target[1:].isdigit():
+        return int(target)
+    elif target.isdigit():
+        return int(target)
+    elif not target.startswith("@") and not target.startswith("+"):
+        return f"@{target}"
+    return target
+
+
 class UserClientManager:
     def __init__(self):
         self.clients: Dict[int, TelegramClient] = {}
@@ -23,11 +41,18 @@ class UserClientManager:
         self._pending_2fa: Dict[int, bool] = {}
 
     async def get_or_create_client(self, user_id: int) -> TelegramClient:
-        if user_id in self.clients and self.clients[user_id].is_connected():
-            return self.clients[user_id]
+        if user_id in self.clients:
+            client = self.clients[user_id]
+            if not client.is_connected():
+                try:
+                    await client.connect()
+                except Exception as e:
+                    logger.warning(f"Reconnecting client for {user_id}: {e}")
+            if await client.is_user_authorized():
+                return client
 
+        # Load session string from persistent local storage or Supabase
         session_str = await db.get_kv(f"telethon_session_{user_id}", default="")
-        # Fallback to general session if user session not found
         if not session_str and user_id != config.owner_id:
             session_str = await db.get_kv("telethon_session", default="")
 
@@ -96,10 +121,9 @@ class UserClientManager:
                 app_version="2.0",
             )
             await client.connect()
-            self.clients[user_id] = client
 
             qr_login_obj = await client.qr_login()
-            self._active_qr_logins[user_id] = qr_login_obj
+            self._active_qr_logins[user_id] = (client, qr_login_obj)
 
             qr_bytes = self.generate_qr_image(qr_login_obj.url)
             await on_qr_generated(qr_bytes)
@@ -108,6 +132,7 @@ class UserClientManager:
                 user = await qr_login_obj.wait(timeout=120)
                 session_str = client.session.save()
                 await db.set_kv(f"telethon_session_{user_id}", session_str)
+                self.clients[user_id] = client
                 await on_success(user)
             except errors.SessionPasswordNeededError:
                 self._pending_2fa[user_id] = True
@@ -120,18 +145,19 @@ class UserClientManager:
             await on_error(str(e))
 
     async def submit_2fa_password(self, user_id: int, password: str) -> Tuple[bool, str]:
-        if not self._pending_2fa.get(user_id) or user_id not in self.clients:
+        if not self._pending_2fa.get(user_id) or user_id not in self._active_qr_logins:
             return False, "هیچ درخواستی در انتظار رمز دو مرحله‌ای نیست."
 
-        client = self.clients[user_id]
+        client, _ = self._active_qr_logins[user_id]
         try:
             user = await client.sign_in(password=password)
             session_str = client.session.save()
             await db.set_kv(f"telethon_session_{user_id}", session_str)
+            self.clients[user_id] = client
             self._pending_2fa[user_id] = False
             return True, f"ورود با موفقیت انجام شد: {getattr(user, 'first_name', 'User')}"
         except errors.PasswordHashInvalidError:
-            return False, "رمز دو مرحله‌ای نادرست است."
+            return False, "رمز دو مرحله‌ای وارد شده نادرست است."
         except Exception as e:
             logger.error(f"Error submitting 2FA for {user_id}: {e}")
             return False, f"خطا در ورود: {str(e)}"
@@ -142,14 +168,7 @@ class UserClientManager:
             return []
 
         try:
-            target = entity_str.strip()
-            if target.startswith("https://t.me/"):
-                target = target.replace("https://t.me/", "")
-            if target.startswith("-100") and target[4:].isdigit():
-                target = int(target)
-            elif target.isdigit():
-                target = int(target)
-
+            target = normalize_channel_target(entity_str)
             return await client.get_messages(target, limit=limit)
         except Exception as e:
             logger.error(f"Failed to fetch messages for user {user_id} from {entity_str}: {e}")
