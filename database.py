@@ -304,5 +304,20 @@ class Database:
         except Exception:
             return {"pending": 0, "published": 0, "rejected": 0, "failed": 0}
 
+async def clear_user_hashes(self, user_id: int) -> int:
+        """پاک‌سازی کامل تمام رکوردهای تکراری از رم، فایل و سوپابیس"""
+        keys_to_del = [k for k in list(self._cache.keys()) if k.startswith(f"hash_{user_id}_")]
+        for k in keys_to_del:
+            del self._cache[k]
+        self._save_local_cache()
 
+        if self.client:
+            try:
+                await asyncio.to_thread(
+                    lambda: self.client.table("nm_hashes").delete().eq("user_id", user_id).execute()
+                )
+            except Exception as e:
+                logger.error(f"Error truncating hashes in DB: {e}")
+
+        return len(keys_to_del)
 db = Database()
