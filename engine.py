@@ -22,7 +22,7 @@ def compute_content_hash(source: str, msg_id: int, text: Optional[str]) -> str:
 class NewsEngine:
     async def scan_user_sources(self, user_id: int) -> int:
         settings = await db.get_user_settings(user_id)
-        if not settings.running or not settings.sources:
+        if not settings.sources:
             return 0
 
         is_auth = await user_client_manager.is_authorized(user_id)
@@ -43,8 +43,6 @@ class NewsEngine:
                     if await db.has_hash(user_id, h):
                         continue
 
-                    await db.add_hash(user_id, h)
-
                     media_type, media_path = await user_client_manager.download_media(
                         user_id,
                         msg,
@@ -52,7 +50,8 @@ class NewsEngine:
                         allow_video=settings.send_video,
                     )
 
-                    await db.enqueue_message(
+                    # ابتدا در دیتابیس ثبت می‌شود
+                    queue_id = await db.enqueue_message(
                         user_id=user_id,
                         source=source,
                         msg_id=msg.id,
@@ -60,17 +59,24 @@ class NewsEngine:
                         media_type=media_type,
                         media_file_id=media_path,
                     )
-                    total_queued += 1
+
+                    # فقط در صورت ذخیره موفق، به لیست هش‌ها اضافه شده و شمارش می‌شود
+                    if queue_id:
+                        await db.add_hash(user_id, h)
+                        total_queued += 1
+                    else:
+                        logger.error(f"Failed to enqueue message {msg.id} for user {user_id}")
+
             except Exception as e:
                 logger.error(f"Error scanning source '{source}' for user {user_id}: {e}")
 
         if total_queued > 0:
-            logger.info(f"User {user_id}: Queued {total_queued} new posts.")
+            logger.info(f"User {user_id}: Successfully queued {total_queued} new posts.")
         return total_queued
 
     async def publish_user_tick(self, user_id: int, bot: Bot) -> bool:
         settings = await db.get_user_settings(user_id)
-        if not settings.running or not settings.dest_channel:
+        if not settings.dest_channel:
             return False
 
         item = await db.get_next_queue_item(user_id=user_id)
