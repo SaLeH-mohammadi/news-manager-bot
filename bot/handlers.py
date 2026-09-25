@@ -132,7 +132,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = get_main_menu_keyboard(settings.running, settings.send_photo, settings.send_video, is_owner=is_owner)
         await safe_edit_message(query, text, reply_markup=keyboard)
 
-    # اسکن دستی
+# 5. Scan Now (با گزارش دقیق)
     elif data == "scan_now":
         if not settings.sources:
             await safe_edit_message(
@@ -142,14 +142,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await safe_edit_message(query, "🔄 در حال شروع اسکن منابع خبری اختصاصی شما... لطفاً کمی صبر کنید.")
-        queued_count = await engine.scan_user_sources(user_id)
-        await safe_edit_message(
-            query,
-            f"✅ اسکن پایان یافت.\nتعداد `{queued_count}` خبر جدید به صف اختصاصی شما افزوده شد.",
-            reply_markup=get_back_keyboard(),
-        )
+        is_auth = await user_client_manager.is_authorized(user_id)
+        if not is_auth:
+            await safe_edit_message(
+                query,
+                "❌ **اکانت تلگرام (یوزربات) متصل نیست!**\n\n"
+                "برای اینکه ربات بتواند پست‌های کانال‌ها را بخواند، ابتدا باید از منوی اصلی روی دکمه **«📱 ورود / اتصال اکانت (QR)»** کلیک کرده و کد را با گوشی خود اسکن نمایید.",
+                reply_markup=get_back_keyboard(),
+            )
+            return
 
+        await safe_edit_message(query, "🔄 در حال شروع اسکن دقیق منابع خبری شما... لطفاً چند ثانیه صبر کنید.")
+        queued_count, report_text = await engine.scan_user_sources_with_report(user_id)
+
+        msg = (
+            f"📊 **نتیجه اسکن منابع:**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{report_text}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 مجموع پست‌های جدید افزوده شده به صف: `{queued_count}`"
+        )
+        await safe_edit_message(query, msg, reply_markup=get_back_keyboard())
     # انتشار فوری
     elif data == "publish_now":
         if not settings.dest_channel:
