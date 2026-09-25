@@ -73,7 +73,48 @@ class NewsEngine:
         if total_queued > 0:
             logger.info(f"User {user_id}: Successfully queued {total_queued} new posts.")
         return total_queued
+    async def scan_user_sources_with_report(self, user_id: int):
+        settings = await db.get_user_settings(user_id)
+        total_queued = 0
+        reports = []
 
+        for source in settings.sources:
+            try:
+                messages = await user_client_manager.fetch_channel_messages(user_id, source, limit=10)
+                if not messages:
+                    reports.append(f"📡 `{source}`: پیام جدیدی دریافت نشد (یا کانال خصوصی است و عضو آن نیستید).")
+                    continue
+
+                new_count = 0
+                dup_count = 0
+                for msg in reversed(messages):
+                    text = msg.message or msg.text or ""
+                    if not text and not msg.media:
+                        continue
+
+                    h = compute_content_hash(source, msg.id, text)
+                    if await db.has_hash(user_id, h):
+                        dup_count += 1
+                        continue
+
+                    media_type, media_path = await user_client_manager.download_media(
+                        user_id, msg, allow_photo=settings.send_photo, allow_video=settings.send_video
+                    )
+
+                    queue_id = await db.enqueue_message(
+                        user_id=user_id, source=source, msg_id=msg.id, text=text,
+                        media_type=media_type, media_file_id=media_path
+                    )
+                    if queue_id:
+                        await db.add_hash(user_id, h)
+                        total_queued += 1
+                        new_count += 1
+
+                reports.append(f"📡 `{source}`: {len(messages)} پیام بررسی شد ({new_count} جدید، {dup_count} تکراری)")
+            except Exception as e:
+                reports.append(f"⚠️ `{source}`: خطا در خواندن ({str(e)[:30]})")
+
+        return total_queued, "\n".join(reports)
     async def publish_user_tick(self, user_id: int, bot: Bot) -> bool:
         settings = await db.get_user_settings(user_id)
         if not settings.dest_channel:
